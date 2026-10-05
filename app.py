@@ -40,6 +40,7 @@ from src.budget import (
 from src.csv_importer import prepare_csv
 
 from src.reports import generate_report
+from src.validation import validate_expense
 
 
 st.set_page_config(
@@ -51,10 +52,9 @@ st.set_page_config(
 create_database()
 
 
-st.title("💰 Financial Advisor AI")
-st.caption(
-    "AI-powered expense tracking and personal finance analysis"
-)
+st.title("💰 Financial Advisor & Expense Manager AI Agent")
+st.caption("Track expenses • Analyze spending • Manage budgets • Get financial insights")
+st.divider()
 
 
 # =========================================================
@@ -142,28 +142,25 @@ manual_date = st.date_input(
     value=date.today()
 )
 
-if st.button(
-    "Add Expense",
-    type="primary"
-):
+if st.button("Add Expense", type="primary"):
+    valid, message = validate_expense(
+        manual_merchant,
+        manual_amount,
+        manual_date
+    )
 
-    if manual_amount <= 0:
-        st.error("Please enter a valid amount.")
-
+    if not valid:
+        st.error(message)
     else:
         add_expense(
-            manual_merchant if manual_merchant else "Unknown",
+            manual_merchant.strip(),
             manual_amount,
             manual_category,
             "",
             str(manual_date),
             "Manual"
         )
-
-        st.success(
-            "Expense added successfully."
-        )
-
+        st.success("Expense added successfully.")
         st.rerun()
 
 
@@ -196,92 +193,111 @@ if uploaded_file is not None:
 
         try:
 
-            text = extract_text_from_image(
+            extracted_text = extract_text_from_image(
                 uploaded_file
             )
 
-            st.subheader(
-                "🔍 Extracted Text"
-            )
+            if not extracted_text.strip():
 
-            st.text_area(
-                "OCR Result",
-                text,
-                height=200
-            )
-
-            expense = parse_expense(
-                text
-            )
-
-            merchant = expense[
-                "merchant"
-            ]
-
-            amount = expense[
-                "amount"
-            ]
-
-            category = categorize_expense(
-                text
-            )
-
-            st.subheader(
-                "💰 Expense Details"
-            )
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                st.metric(
-                    "Merchant",
-                    merchant
+                st.error(
+                    "❌ No text could be extracted from the receipt."
                 )
 
-            with col2:
-                if amount is not None:
-                    st.metric(
-                        "Amount",
-                        f"₹{amount:.2f}"
+            else:
+                receipt_keywords = [
+                    "total",
+                    "amount",
+                    "paid",
+                    "payment",
+                    "subtotal",
+                    "invoice",
+                    "receipt",
+                    "tax",
+                    "gst",
+                    "upi",
+                    "transaction",
+                    "merchant"
+                ]
+
+                text_lower = extracted_text.lower()
+
+                keyword_found = any(
+                    keyword in text_lower
+                    for keyword in receipt_keywords
+                )
+
+                if not keyword_found:
+                    st.error(
+                        "❌ This does not appear to be a valid receipt. "
+                        "Please upload a bill or payment receipt."
                     )
                 else:
-                    st.metric(
-                        "Amount",
-                        "Not detected"
+                    expense = parse_expense(
+                        extracted_text
                     )
 
-            with col3:
-                st.metric(
-                    "Category",
-                    category
-                )
-
-            if amount is not None:
-
-                if st.button(
-                    "Save Receipt Expense"
-                ):
-
-                    add_expense(
-                        merchant,
-                        amount,
-                        category,
-                        text,
-                        str(date.today()),
-                        "OCR Receipt"
+                    category = categorize_expense(
+                        extracted_text
                     )
 
-                    st.success(
-                        "Receipt expense saved."
-                    )
+                    if expense["amount"] is None:
+                        st.error(
+                            "❌ Expense amount could not be detected."
+                        )
+                    else:
+                        st.session_state["expense"] = expense
+                        st.session_state["category"] = category
+                        st.session_state["extracted_text"] = extracted_text
 
-                    st.rerun()
+                        st.success(
+                            "✅ Receipt processed successfully!"
+                        )
 
         except Exception as e:
 
             st.error(
-                f"OCR processing failed: {e}"
+                f"OCR failed: {e}"
             )
+
+    if "expense" in st.session_state and st.session_state["expense"] is not None:
+        expense = st.session_state["expense"]
+        category = st.session_state.get("category", "Other")
+        extracted_text = st.session_state.get("extracted_text", "")
+        merchant = expense.get("merchant", "Unknown")
+        amount = expense.get("amount")
+
+        st.subheader("💰 Expense Details")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("Merchant", merchant)
+
+        with col2:
+            if amount is not None:
+                st.metric("Amount", f"₹{amount:.2f}")
+            else:
+                st.metric("Amount", "Not detected")
+
+        with col3:
+            st.metric("Category", category)
+
+        if amount is not None:
+            if st.button("Save Receipt Expense"):
+                add_expense(
+                    merchant,
+                    amount,
+                    category,
+                    extracted_text,
+                    str(date.today()),
+                    "OCR Receipt"
+                )
+                st.success("Receipt expense saved.")
+                del st.session_state["expense"]
+                if "category" in st.session_state:
+                    del st.session_state["category"]
+                if "extracted_text" in st.session_state:
+                    del st.session_state["extracted_text"]
+                st.rerun()
 
 
 # =========================================================
@@ -299,80 +315,94 @@ csv_file = st.file_uploader(
 if csv_file is not None:
 
     try:
+        csv_df = prepare_csv(csv_file)
 
-        csv_df = prepare_csv(
-            csv_file
-        )
+        if csv_df.empty:
+            st.warning("⚠️ The CSV file contains no data.")
+        else:
+            st.write("CSV Preview")
 
-        st.write(
-            "CSV Preview"
-        )
-
-        st.dataframe(
-            csv_df,
-            width="stretch"
-        )
-
-        if st.button(
-            "Import CSV Expenses"
-        ):
-
-            imported_count = 0
-
-            for _, row in csv_df.iterrows():
-
-                amount = row.get(
-                    "Amount"
-                )
-
-                merchant = row.get(
-                    "Merchant",
-                    "Unknown"
-                )
-
-                category = row.get(
-                    "Category",
-                    "Other"
-                )
-
-                expense_date = row.get(
-                    "Date",
-                    date.today()
-                )
-
-                if pd.isna(amount):
-                    continue
-
-                if pd.isna(merchant):
-                    merchant = "Unknown"
-
-                if pd.isna(category):
-                    category = "Other"
-
-                if pd.isna(expense_date):
-                    expense_date = date.today()
-
-                add_expense(
-                    str(merchant),
-                    float(amount),
-                    str(category),
-                    "",
-                    str(expense_date),
-                    "CSV"
-                )
-
-                imported_count += 1
-
-            st.success(
-                f"{imported_count} expenses imported successfully."
+            st.dataframe(
+                csv_df,
+                width="stretch"
             )
 
-            st.rerun()
+            if st.button("Import CSV Expenses"):
+
+                imported_count = 0
+                skipped_count = 0
+
+                for _, row in csv_df.iterrows():
+
+                    try:
+                        amount = row.get("Amount")
+                        merchant = row.get(
+                            "Merchant",
+                            "Unknown"
+                        )
+                        category = row.get(
+                            "Category",
+                            "Other"
+                        )
+                        expense_date = row.get(
+                            "Date",
+                            date.today()
+                        )
+
+                        if pd.isna(amount):
+                            skipped_count += 1
+                            continue
+
+                        amount = float(amount)
+
+                        if amount <= 0:
+                            skipped_count += 1
+                            continue
+
+                        if pd.isna(merchant):
+                            merchant = "Unknown"
+
+                        if pd.isna(category):
+                            category = "Other"
+
+                        if pd.isna(expense_date):
+                            expense_date = date.today()
+
+                        add_expense(
+                            str(merchant).strip(),
+                            amount,
+                            str(category).strip(),
+                            "",
+                            str(expense_date),
+                            "CSV"
+                        )
+
+                        imported_count += 1
+
+                    except (ValueError, TypeError):
+                        skipped_count += 1
+                        continue
+
+                if imported_count > 0:
+                    st.success(
+                        f"✅ {imported_count} expenses imported successfully."
+                    )
+
+                if skipped_count > 0:
+                    st.warning(
+                        f"⚠️ {skipped_count} invalid rows were skipped."
+                    )
+
+                if imported_count == 0:
+                    st.error(
+                        "❌ No valid expenses were found in the CSV."
+                    )
+                else:
+                    st.rerun()
 
     except Exception as e:
-
         st.error(
-            f"Could not import CSV: {e}"
+            f"❌ Could not import CSV: {e}"
         )
 
 
@@ -425,33 +455,10 @@ else:
 
 col1, col2, col3, col4 = st.columns(4)
 
-with col1:
-
-    st.metric(
-        "Total Spending",
-        f"₹{total_spending(df):,.2f}"
-    )
-
-with col2:
-
-    st.metric(
-        "Transactions",
-        transaction_count(df)
-    )
-
-with col3:
-
-    st.metric(
-        "Average Expense",
-        f"₹{average_expense(df):,.2f}"
-    )
-
-with col4:
-
-    st.metric(
-        "Highest Expense",
-        f"₹{highest_expense(df):,.2f}"
-    )
+col1.metric("Total Spending", f"₹{total_spending(df):,.2f}")
+col2.metric("Transactions", transaction_count(df))
+col3.metric("Average Expense", f"₹{average_expense(df):,.2f}")
+col4.metric("Highest Expense", f"₹{highest_expense(df):,.2f}")
 
 
 # =========================================================
@@ -780,11 +787,11 @@ if not df.empty:
 
 
 # =========================================================
-# SOURCE ANALYSIS
+# SPENDING BY SOURCE
 # =========================================================
 
 st.subheader(
-    "📥 Expense Sources"
+    "💳 Spending by Source"
 )
 
 if not df.empty:
@@ -794,6 +801,12 @@ if not df.empty:
     )
 
     if not source_df.empty:
+
+        st.bar_chart(
+            source_df.set_index(
+                "Source"
+            )["Amount"]
+        )
 
         st.dataframe(
             source_df,
